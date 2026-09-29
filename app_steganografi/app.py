@@ -6,7 +6,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 MAGIC = b"LSB1"
 HEADER_SIZE = len(MAGIC) + 4
@@ -178,10 +178,29 @@ def calculate_ber(image: Image.Image, message: str, method: str) -> float:
     return errors / len(expected_bits)
 
 
-def apply_attack(image: Image.Image, quality: int = 50) -> Image.Image:
+def apply_attack(
+    image: Image.Image,
+    quality: int = 50,
+    attack_type: str = "JPEG",
+    blur_radius: float = 2.0,
+    noise_stddev: float = 10.0,
+    noise_seed: int = 0,
+) -> Image.Image:
+    rgb = image.convert("RGB")
+    if attack_type == "Gaussian blur":
+        if not math.isfinite(blur_radius) or blur_radius < 0:
+            raise ValueError("Radius Gaussian blur harus berupa angka non-negatif.")
+        return rgb.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    if attack_type == "Gaussian noise":
+        if not math.isfinite(noise_stddev) or noise_stddev < 0:
+            raise ValueError("Standar deviasi Gaussian noise harus berupa angka non-negatif.")
+        pixels = np.asarray(rgb, dtype=np.float32)
+        noise = np.random.default_rng(noise_seed).normal(0, noise_stddev, pixels.shape)
+        return Image.fromarray(np.clip(np.rint(pixels + noise), 0, 255).astype(np.uint8))
+    if attack_type != "JPEG":
+        raise ValueError("Jenis serangan tidak dikenal.")
     if not 1 <= quality <= 100:
         raise ValueError("Kualitas JPEG harus antara 1 sampai 100%.")
-    rgb = image.convert("RGB")
     output = io.BytesIO()
     rgb.save(output, format="JPEG", quality=quality)
     output.seek(0)
@@ -198,8 +217,12 @@ class SteganographyApp(tk.Tk):
         self.image_path = tk.StringVar()
         self.method = tk.StringVar(value="LSB")
         self.jpeg_quality = tk.IntVar(value=50)
+        self.blur_radius = tk.DoubleVar(value=2.0)
+        self.noise_stddev = tk.DoubleVar(value=10.0)
         self.capacity_text = tk.StringVar(value="Kapasitas: -")
+        self.payload_size_text = tk.StringVar(value="Ukuran payload UTF-8: 0 byte")
         self.ber_text = tk.StringVar(value="BER: -")
+        self.attack_ber_results = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -249,6 +272,8 @@ class SteganographyApp(tk.Tk):
         ttk.Label(encode_tab, text="Pesan rahasia").pack(anchor="w")
         self.message_box = tk.Text(encode_tab, height=12, wrap="word", font=("Segoe UI", 11), undo=True)
         self.message_box.pack(fill="both", expand=True, pady=(7, 12))
+        self.message_box.bind("<KeyRelease>", self.update_payload_size)
+        ttk.Label(encode_tab, textvariable=self.payload_size_text).pack(anchor="w", pady=(0, 8))
         ttk.Button(encode_tab, text="Sisipkan dan simpan PNG", command=self.encode).pack(anchor="e")
 
         ttk.Label(decode_tab, text="Pesan hasil ekstraksi").pack(anchor="w")
@@ -256,18 +281,44 @@ class SteganographyApp(tk.Tk):
         self.extracted_box.pack(fill="both", expand=True, pady=(7, 12))
         ttk.Button(decode_tab, text="Ekstrak pesan", command=self.decode).pack(anchor="e")
 
-        ttk.Label(attack_tab, text="Uji BER setelah kompresi JPEG pada gambar stego yang dipilih.").pack(anchor="w")
-        ttk.Label(attack_tab, text="Kualitas kompresi JPEG (%)").pack(anchor="w", pady=(16, 4))
+        ttk.Label(attack_tab, text="Bandingkan BER dari tiga serangan pada gambar stego yang dipilih.").pack(anchor="w")
+        attack_settings = ttk.LabelFrame(attack_tab, text="Parameter serangan", padding=10)
+        attack_settings.pack(fill="x", pady=(12, 0))
+        ttk.Label(attack_settings, text="Kualitas JPEG (%)").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
         ttk.Spinbox(
-            attack_tab,
+            attack_settings,
             from_=1,
             to=100,
             increment=1,
             textvariable=self.jpeg_quality,
             width=8,
-        ).pack(anchor="w")
-        ttk.Button(attack_tab, text="Jalankan uji BER", command=self.test_attack).pack(anchor="w", pady=(14, 8))
+        ).grid(row=0, column=1, sticky="w", pady=3)
+        ttk.Label(attack_settings, text="Radius Gaussian blur").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Spinbox(
+            attack_settings,
+            from_=0,
+            to=20,
+            increment=0.5,
+            textvariable=self.blur_radius,
+            width=8,
+        ).grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(attack_settings, text="Sigma Gaussian noise").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Spinbox(
+            attack_settings,
+            from_=0,
+            to=100,
+            increment=1,
+            textvariable=self.noise_stddev,
+            width=8,
+        ).grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Button(attack_tab, text="Bandingkan semua serangan", command=self.test_attack).pack(anchor="w", pady=(12, 8))
         ttk.Label(attack_tab, textvariable=self.ber_text, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        self.ber_chart = tk.Canvas(attack_tab, height=250, background="white", highlightthickness=1, highlightbackground="#cccccc")
+        self.ber_chart.pack(fill="x", expand=True, pady=(8, 12))
+        self.ber_chart.bind("<Configure>", self.draw_ber_chart)
+        ttk.Label(attack_tab, text="Pesan hasil ekstraksi setelah serangan").pack(anchor="w", pady=(14, 4))
+        self.attack_extracted_box = tk.Text(attack_tab, height=7, wrap="word", font=("Segoe UI", 10), state="disabled")
+        self.attack_extracted_box.pack(fill="both", expand=True)
         ttk.Label(
             attack_tab,
             text="BER = jumlah bit pesan yang salah atau hilang dibagi jumlah bit pesan.",
@@ -295,6 +346,47 @@ class SteganographyApp(tk.Tk):
         except Exception as error:
             self.capacity_text.set("Kapasitas: -")
             messagebox.showerror("Gagal membuka gambar", str(error))
+
+    def update_payload_size(self, _event=None):
+        message = self.message_box.get("1.0", "end-1c")
+        payload_size = len(message.encode("utf-8"))
+        self.payload_size_text.set(f"Ukuran payload UTF-8: {payload_size:,} byte")
+
+    def draw_ber_chart(self, _event=None):
+        chart = self.ber_chart
+        chart.delete("all")
+        width = max(chart.winfo_width(), 420)
+        height = max(chart.winfo_height(), 250)
+        left, right, top, bottom = 58, 18, 26, 44
+        plot_height = height - top - bottom
+        plot_width = width - left - right
+
+        for percentage in range(0, 101, 25):
+            y = top + plot_height * (1 - percentage / 100)
+            chart.create_line(left, y, width - right, y, fill="#d9dee5")
+            chart.create_text(left - 8, y, text=f"{percentage}%", anchor="e", fill="#333333")
+
+        attacks = ("JPEG", "Gaussian blur", "Gaussian noise")
+        bar_width = min(72, plot_width / (len(attacks) * 2))
+        colors = ("#258c8c", "#e09f3e", "#5875a4")
+        for index, (attack, color) in enumerate(zip(attacks, colors)):
+            center_x = left + plot_width * (index + 0.5) / len(attacks)
+            ber = self.attack_ber_results.get(attack)
+            if ber is not None:
+                bar_height = plot_height * ber
+                chart.create_rectangle(
+                    center_x - bar_width / 2,
+                    top + plot_height - bar_height,
+                    center_x + bar_width / 2,
+                    top + plot_height,
+                    fill=color,
+                    outline="",
+                )
+                chart.create_text(center_x, max(top + 8, top + plot_height - bar_height - 12), text=f"{ber * 100:.2f}%")
+            chart.create_text(center_x, height - bottom + 22, text=attack, fill="#222222")
+
+        if not self.attack_ber_results:
+            chart.create_text(left + plot_width / 2, top + plot_height / 2, text="Jalankan pengujian untuk melihat grafik BER", fill="#555555")
 
     def encode(self):
         if not self.image_path.get():
@@ -346,10 +438,34 @@ class SteganographyApp(tk.Tk):
             return
         try:
             with Image.open(self.image_path.get()) as image:
-                quality = self.jpeg_quality.get()
-                attacked = apply_attack(image, quality)
-            ber = calculate_ber(attacked, message, self.method.get())
-            self.ber_text.set(f"BER setelah JPEG kualitas {quality}%: {ber:.6f} ({ber * 100:.2f}%)")
+                stego = image.convert("RGB").copy()
+            attacks = (
+                ("JPEG", {"quality": self.jpeg_quality.get()}),
+                ("Gaussian blur", {"attack_type": "Gaussian blur", "blur_radius": self.blur_radius.get()}),
+                (
+                    "Gaussian noise",
+                    {"attack_type": "Gaussian noise", "noise_stddev": self.noise_stddev.get()},
+                ),
+            )
+            results = {}
+            extracted_messages = []
+            for attack_name, parameters in attacks:
+                attacked = apply_attack(stego, **parameters)
+                results[attack_name] = calculate_ber(attacked, message, self.method.get())
+                try:
+                    extracted = extract_message(attacked, self.method.get())
+                except ValueError as error:
+                    extracted = f"Ekstraksi gagal: {error}"
+                extracted_messages.append(f"[{attack_name}]\n{extracted}")
+
+            self.attack_ber_results = results
+            self.draw_ber_chart()
+            summary = " | ".join(f"{name}: {ber * 100:.2f}%" for name, ber in results.items())
+            self.ber_text.set(f"BER: {summary}")
+            self.attack_extracted_box.configure(state="normal")
+            self.attack_extracted_box.delete("1.0", "end")
+            self.attack_extracted_box.insert("1.0", "\n\n".join(extracted_messages))
+            self.attack_extracted_box.configure(state="disabled")
         except Exception as error:
             messagebox.showerror("Gagal menguji serangan", str(error))
 
