@@ -200,6 +200,7 @@ class SteganographyApp(tk.Tk):
         self.jpeg_quality = tk.IntVar(value=50)
         self.capacity_text = tk.StringVar(value="Kapasitas: -")
         self.ber_text = tk.StringVar(value="BER: -")
+        self.attack_status = tk.StringVar(value="Status teks: -")
         self._build_ui()
 
     def _build_ui(self):
@@ -273,6 +274,17 @@ class SteganographyApp(tk.Tk):
             text="BER = jumlah bit pesan yang salah atau hilang dibagi jumlah bit pesan.",
             foreground="#555555",
         ).pack(anchor="w", pady=(8, 0))
+        ttk.Label(attack_tab, textvariable=self.attack_status, font=("Segoe UI", 11, "bold")).pack(
+            anchor="w", pady=(14, 4)
+        )
+        self.attacked_message_box = tk.Text(
+            attack_tab,
+            height=6,
+            wrap="word",
+            font=("Segoe UI", 10),
+            state="disabled",
+        )
+        self.attacked_message_box.pack(fill="both", expand=True)
 
     def choose_image(self):
         path = filedialog.askopenfilename(
@@ -350,6 +362,19 @@ class SteganographyApp(tk.Tk):
                 attacked = apply_attack(image, quality)
             ber = calculate_ber(attacked, message, self.method.get())
             self.ber_text.set(f"BER setelah JPEG kualitas {quality}%: {ber:.6f} ({ber * 100:.2f}%)")
+            try:
+                extracted = extract_message(attacked, self.method.get())
+                if extracted == message:
+                    self.attack_status.set("Status teks: utuh, hasil ekstraksi sama dengan pesan asli.")
+                else:
+                    self.attack_status.set("Status teks: berubah atau rusak setelah kompresi.")
+            except ValueError as error:
+                extracted = f"Pesan tidak dapat diekstrak: {error}"
+                self.attack_status.set("Status teks: gagal diekstrak setelah kompresi.")
+            self.attacked_message_box.configure(state="normal")
+            self.attacked_message_box.delete("1.0", "end")
+            self.attacked_message_box.insert("1.0", extracted)
+            self.attacked_message_box.configure(state="disabled")
         except Exception as error:
             messagebox.showerror("Gagal menguji serangan", str(error))
 
